@@ -8,72 +8,90 @@ Juliaup is not in nixpkgs. This flake builds juliaup from source using `rustPlat
 
 | Package | Binary | Description |
 |---------|--------|-------------|
-| `juliaup` (default) | `juliaup` | Julia version manager CLI, built from source |
-| `julia` | `julia` | Latest stable (1.13.0) — pinned in the Nix store |
-| `julia-lts` | `julia` | LTS (1.10.9) — pinned in the Nix store |
+| `juliaup` (default) | `juliaup`, `julia` | Julia version manager CLI + `julialauncher` multiplexer |
+| `julia` | `julia` | Standalone Stable (1.13.0) — pinned in the Nix store |
+| `julia-lts` | `julia` | Standalone LTS (1.10.9) — pinned in the Nix store |
 | `julia-1_13_0` | — | Raw Julia 1.13.0 binary (no wrapper) |
 | `julia-1_10_9` | — | Raw Julia 1.10.9 binary (no wrapper) |
 
-`julia` and `julia-lts` both expose `/bin/julia` — install only one at a time in `home.packages`.
+### About `juliaup` and `julialauncher`
 
-> **Why a separate `julia` wrapper?** juliaup uses `current_exe()` (resolves symlinks via `/proc/self/exe` on Linux) to decide whether to launch Julia or show its own CLI. A plain `julia → juliaup` symlink always resolves to the store path, so juliaup sees itself as `juliaup` and shows its own help. The wrappers simply `exec` the pinned binary from the Nix store — no runtime dispatch, no `~/.julia/juliaup/` dependency.
+Building `juliaup` from Rust source builds **both** binaries:
+- `juliaup`: the version manager CLI.
+- `julia`: the official `julialauncher` multiplexer.
 
-> **Why not `environment.systemPackages`?** The `julia` package must go in `home.packages` (user-level), not `environment.systemPackages`, to avoid binary conflicts with `julia-bin` pulled transitively by tools such as quarto.
+Installing `packages.juliaup` provides both `juliaup` and `julia`. The launcher handles channel dispatching (`julia +1.10`, `julia +lts`, `julia +release`) dynamically based on `~/.julia/juliaup/juliaup.json`.
+
+> **Note on standalone wrappers:** `julia` and `julia-lts` are standalone wrappers around store-pinned binaries (built with `autoPatchelfHook`). They are useful for `nix run` or purely declarative setups without `nix-ld`. If you use `juliaup`, install `packages.juliaup` directly (and avoid shadowing it with standalone wrappers).
+
+## NixOS Setup (Juliaup + nix-ld)
+
+Because Julia binaries downloaded dynamically by `juliaup add <version>` are standard dynamically linked Linux executables, NixOS requires `programs.nix-ld` to run them:
+
+```nix
+# flake.nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    juliaup-nix = {
+      url = "github:s-celles/juliaup-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs = { self, nixpkgs, juliaup-nix, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ({ pkgs, ... }: {
+          # System packages: provides both `juliaup` and `julia` launcher
+          environment.systemPackages = [
+            juliaup-nix.packages.${pkgs.stdenv.hostPlatform.system}.juliaup
+          ];
+
+          # Dynamic linker for binaries downloaded by juliaup
+          programs.nix-ld = {
+            enable = true;
+            libraries = with pkgs; [
+              stdenv.cc.cc.lib
+              zlib
+              openssl
+              curl
+              libssh2  # Required for Julia 1.10 (LTS) LibCURL compatibility!
+            ];
+          };
+        })
+      ];
+    };
+  };
+}
+```
+
+> **Important tip for Julia 1.10 (LTS):** If you include `curl` in `programs.nix-ld.libraries`, you **must** also include `libssh2`. Otherwise, Nixpkgs's `libcurl.so.4` will attempt to link against Julia 1.10's older bundled `libssh2.so.1`, leading to a symbol resolution error (`undefined symbol: libssh2_session_callback_set2`).
 
 ## Quick start
 
 ```bash
-# Try juliaup without installing
-nix run github:s-celles/juliaup-nix -- add release
+# Install channels
+juliaup add release && juliaup default release
+juliaup add lts
 
-# Run pinned Julia directly
+# Verify and switch versions
+julia --version   # default release (1.13.0)
+julia +1.10       # LTS (1.10.12)
+julia +lts        # LTS (1.10.12)
+```
+
+## Standalone / Pure Nix Usage (no nix-ld)
+
+You can run pinned Julia versions directly from the Nix store without installing Juliaup or enabling `nix-ld`:
+
+```bash
 nix run github:s-celles/juliaup-nix#julia      # latest stable (1.13.0)
 nix run github:s-celles/juliaup-nix#julia-lts  # LTS (1.10.9)
 ```
 
-## NixOS / Home Manager
-
-Add the input to your `flake.nix`:
-
-```nix
-inputs = {
-  nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  juliaup-nix = {
-    url = "github:s-celles/juliaup-nix";
-    inputs.nixpkgs.follows = "nixpkgs";
-  };
-};
-```
-
-Install `juliaup` as a system package and the `julia` wrapper as a user package:
-
-```nix
-# NixOS module — system-level (juliaup CLI only)
-environment.systemPackages = [
-  inputs.juliaup-nix.packages.${pkgs.stdenv.hostPlatform.system}.juliaup
-];
-
-# Home Manager — user-level: choose one julia wrapper
-home.packages = [
-  inputs.juliaup-nix.packages.${pkgs.stdenv.hostPlatform.system}.julia      # latest stable
-  # inputs.juliaup-nix.packages.${pkgs.stdenv.hostPlatform.system}.julia-lts  # or LTS
-];
-```
-
-After rebuild:
-
-```bash
-julia --version  # no download required — served from the Nix store
-juliaup add 1.9 && juliaup default 1.9  # juliaup still manages other versions
-```
-
-## Reproducibility
-
-- **No runtime download**: `julia` works immediately after `nixos-rebuild switch`.
-- **Pinned binary**: Julia version is fixed by the flake hash — bump the flake revision to upgrade.
-- **juliaup still useful**: for accessing other Julia versions on demand (`juliaup add 1.9`, etc.).
-
-## Updating Julia version
+## Updating Julia versions
 
 Update the relevant `mkJuliaBin` call in `flake.nix` with the new version's URLs and hashes, then bump the flake in your configuration:
 

@@ -117,17 +117,17 @@
             };
           };
 
-          # ── wrappers julia ───────────────────────────────────────────────────
-          # Exec direct vers le store Nix — pas de dispatch runtime juliaup.
-          # À inclure dans home.packages (pas environment.systemPackages) pour
-          # éviter le conflit binaire avec julia-bin tiré transitivement par quarto.
-          # Les deux wrappers exposent /bin/julia → n'installez qu'un seul à la fois.
+          # ── standalone pinned julia wrappers ─────────────────────────────────
+          # Exec direct vers le binaire épinglé dans le store Nix (pas de runtime
+          # dispatch via juliaup ni besoin de nix-ld).
+          # Utile pour `nix run .#julia-lts` ou pour exécuter directement une
+          # version figée sans gestionnaire de versions.
           mkJuliaWrapper = drv: pkgs.writeShellScriptBin "julia" ''
             exec ${drv}/bin/julia "$@"
           '';
 
-          julia     = mkJuliaWrapper julia-1_13_0; # stable
-          julia-lts = mkJuliaWrapper julia-1_10_9; # LTS
+          julia     = mkJuliaWrapper julia-1_13_0; # stable (1.13.0)
+          julia-lts = mkJuliaWrapper julia-1_10_9; # LTS (1.10.9)
 
         in {
           packages = {
